@@ -1,0 +1,131 @@
+import cv2
+import os
+import time
+from inference_sdk import InferenceHTTPClient
+
+
+# Initialize Roboflow API Client
+CLIENT = InferenceHTTPClient(
+    api_url="https://detect.roboflow.com",
+    api_key="B1RuqA0WrmlylfU7acl4"
+)
+
+# ------------------------
+# Card Counting Class (Hi-Lo System)
+# ------------------------
+class CardCounting:
+    def __init__(self):
+        self.trueCount = 0
+        self.count = 0
+        self.numOfDecks = 1  
+
+    def calcTrueCount(self):
+        if self.numOfDecks > 0:
+            self.trueCount = self.count / self.numOfDecks  
+
+    def getTrueCount(self):
+        self.calcTrueCount()  
+        return self.trueCount
+
+    def setNumOfDecks(self, numOfDecks: int):
+        self.numOfDecks = numOfDecks
+
+    def addCount(self, card):
+        if card in ["J", "Q", "K", "A", 10]:  
+            self.count -= 1  
+        elif 2 <= card <= 6:  
+            self.count += 1  
+
+    def getCount(self):
+        return self.count
+
+# ------------------------
+# Initialize Game Variables
+# ------------------------
+decks = int(input("Enter number of decks to use: "))
+counter = CardCounting()
+counter.setNumOfDecks(decks)
+
+# Open webcam
+cap = cv2.VideoCapture(0)
+
+# ------------------------
+# Suggest Move Based on Strategy, Hi-Lo Count, Splitting & Doubling
+# ------------------------
+def suggest_move(player_cards, dealer_card):
+    player_total = sum([10 if c[:-1] in ["J", "Q", "K"] else 11 if c[:-1] == "A" else int(c[:-1]) for c in player_cards])
+    true_count = counter.getTrueCount()
+    
+    if len(player_cards) == 2 and player_cards[0][:-1] == player_cards[1][:-1]:  
+        pair_card = player_cards[0][:-1]  
+        if pair_card in ["A", "8"] or (pair_card == "9" and dealer_card not in ["7", "10", "A"]):  
+            return "Split"
+    
+    if player_total == 11:
+        return "Double Down"
+    if player_total == 10 and dealer_card not in ["10", "A"]:
+        return "Double Down"
+    if player_total == 9 and dealer_card in [3, 4, 5, 6]:
+        return "Double Down" if true_count >= 1 else "Hit"
+    
+    if player_total >= 17:
+        return "Stand"
+    if player_total <= 11:
+        return "Hit"
+    if 12 <= player_total <= 16:
+        if dealer_card in [2, 3, 4, 5, 6]:  
+            return "Stand"
+        else:
+            return "Hit" if true_count < 0 else "Stand"  
+    if player_total == 16 and dealer_card == 10:
+        return "Stand" if true_count >= 0 else "Hit"
+    if player_total == 15 and dealer_card == 10:
+        return "Stand" if true_count >= 4 else "Hit"
+
+    return "Hit"
+
+# ------------------------
+# Main Game Loop (Process Webcam Input)
+# ------------------------
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("Failed to grab frame")
+        break
+
+    temp_image_path = "temp_frame.jpg"
+    cv2.imwrite(temp_image_path, frame)
+    result = CLIENT.infer(temp_image_path, model_id="playing-cards-ow27d/4")
+    os.remove(temp_image_path)
+
+    detected_cards = []
+
+    for prediction in result.get('predictions', []):
+        card = prediction['class']
+        x_position = prediction['x']  # Get X coordinate of detected card
+        if card not in [c[0] for c in detected_cards]:  # Prevent duplicate detections
+            detected_cards.append((card, x_position))
+
+    detected_cards.sort(key=lambda x: x[1])  # Sort cards left to right
+
+    dealer_cards = [card[0] for card in detected_cards if card[1] < frame.shape[1] // 2]  # Left half
+    player_cards = [card[0] for card in detected_cards if card[1] >= frame.shape[1] // 2]  # Right half
+
+    dealer_card = dealer_cards[0] if dealer_cards else None
+
+    if player_cards and dealer_card:
+        try:
+            move = suggest_move(player_cards, dealer_card)
+            print(f"Player Cards: {player_cards}, Dealer Card: {dealer_card}, Suggested Move: {move} | Hi-Lo Count: {counter.getCount()} | True Count: {counter.getTrueCount()}")
+        except ValueError:
+            print("Invalid card detected. Skipping round.")
+            continue
+    
+    cv2.imshow("Webcam Inference", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+    
+    time.sleep(5)  # 5-second delay before the next round
+
+cap.release()
+cv2.destroyAllWindows()
